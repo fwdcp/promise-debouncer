@@ -2,23 +2,19 @@ const _ = require('lodash');
 const co = require('co');
 
 module.exports = function(underlying, interval = 0, {
-    leading = null,
-    trailing = null,
-    maxWait = null,
-    waitForNextExecution = null,
-    allowConcurrentExecutions = null
+    leading = false,
+    trailing = true,
+    maxWait = 0,
+    waitForNextExecution = true,
+    allowConcurrentExecutions = false,
+    spaceConsecutiveExecutions = false
 }) {
-    if (_.isNil(leading) && _.isNil(trailing)) {
-        leading = false;
-        trailing = true;
-    }
-    else {
-        leading = !_.isNil(leading) ? !!leading : !trailing;
-        trailing = !_.isNil(trailing) ? !!trailing : !leading;
-    }
+    leading = !!leading;
+    trailing = !!trailing;
     
-    waitForNextExecution = !_.isNil(waitForNextExecution) ? !!waitForNextExecution : true;
-    allowConcurrentExecutions = !_.isNil(allowConcurrentExecutions) ? !!allowConcurrentExecutions : false;
+    waitForNextExecution = !!waitForNextExecution;
+    allowConcurrentExecutions = !!allowConcurrentExecutions;
+    spaceConsecutiveExecutions = !!spaceConsecutiveExecutions;
     
     interval = _.clamp(interval, 0, Number.POSITIVE_INFINITY);
     maxWait = _.clamp(maxWait, interval, Number.POSITIVE_INFINITY);
