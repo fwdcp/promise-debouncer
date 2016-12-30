@@ -31,7 +31,41 @@ module.exports = function(underlying, interval = 0, {
     let nextResolver = null;
     let nextRejecter = null;
     
+    function executeUnderlying(promise, resolve, reject) {
+        return co(function*() {
+            currentlyExecuting = true;
+            
+            if (!spaceConsecutiveExecutions) {
+                lastExecution = Date.now();
+            }
+            
+            try {
+                let result = yield underlying();
+                
+                resolve(result);
+            }
+            catch (err) {
+                reject(err);
+            }
+            
+            // clean up if appropriate
+            if (currentPromise === promise) {
+                currentlyExecuting = false;
+                
+                currentPromise = nextPromise;
+                currentResolver = nextResolver;
+                currentRejecter = nextRejecter;
+                
+                if (spaceConsecutiveExecutions) {
+                    lastExecution = Date.now();
+                }
+            }
+        });
+    }
+    
     return function() {
+        let currentTime = Date.now();
+        
         // TODO: write main logic
     }
 }
