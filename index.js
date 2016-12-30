@@ -32,15 +32,15 @@ module.exports = function(underlying, interval = 0, {
     maxWait = _.clamp(maxWait, interval, MAX_TIMEOUT_VALUE);
 
     let currentlyExecuting = false;
-    
+
     let callWaitBegin = null;
     let lastCall = null;
 
     let nextRunTimer = null;
     let nextRunIsImmediate = false;
-    
+
     let currentPromise = null;
-    
+
     let nextPromise = null;
     let nextResolver = null;
     let nextRejecter = null;
@@ -170,6 +170,7 @@ module.exports = function(underlying, interval = 0, {
     debounced.flush = function flush() {
         executeUnderlying();
     }
+
     debounced.cancel = function cancel() {
         nextRejecter(new Error('call canceled'));
         callWaitBegin = null;
