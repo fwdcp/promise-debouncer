@@ -129,7 +129,7 @@ module.exports = function(underlying, interval = 0, {
         });
     }
     
-    function debounced() {
+    let debounced = function debouncer() {
         let currentTime = Date.now();        
         let withinDebounceInterval = lastCall && lastCall + interval > currentTime;        
         lastCall = currentTime;
@@ -164,7 +164,16 @@ module.exports = function(underlying, interval = 0, {
         
         scheduleNextRun();        
         return nextPromise;
-    }    
+    }
+    
+    debounced.flush = function flush() {
+        executeUnderlying();
+    }
+    debounced.cancel = function cancel() {
+        nextRejecter(new Error('call canceled'));
+        
+        setNextPromise();
+    }
     
     setNextPromise();
     
