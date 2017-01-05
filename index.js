@@ -4,13 +4,13 @@ const co = require('co');
 const MAX_TIMEOUT_VALUE = 2147483647;
 
 module.exports = function(underlying, interval = 0, {
-    leading = false,
-    trailing = true,
+    leading = null,
+    trailing = null,
     maxWait = null,
     delayBetweenExecutions = null,
-    waitForNextExecution = true,
+    condenseExecutions = false,
     allowConcurrentExecutions = false
-}) {
+} = {}) {
     leading = !!leading;
     trailing = !!trailing;
 
@@ -19,223 +19,289 @@ module.exports = function(underlying, interval = 0, {
         trailing = true;
     }
 
-    waitForNextExecution = !!waitForNextExecution;
-
-    // if function executes on leading side only, waiting for next execution makes no sense
-    // same applies for trailing side only and previous execution
-    if (!leading || !trailing) {
-        waitForNextExecution = trailing;
-    }
-
+    condenseExecutions = !!condenseExecutions;
     allowConcurrentExecutions = !!allowConcurrentExecutions;
 
     interval = _.clamp(interval, 0, MAX_TIMEOUT_VALUE);
 
-    let applyMaxWait = _.isNil(maxWait);
+    let applyMaxWait = !_.isNil(maxWait);
     maxWait = _.clamp(maxWait, interval, MAX_TIMEOUT_VALUE);
 
-    let applyDelayBetweenExecutions = _.isNil(delayBetweenExecutions);
+    let applyDelayBetweenExecutions = !_.isNil(delayBetweenExecutions);
     delayBetweenExecutions = _.clamp(delayBetweenExecutions, 0, MAX_TIMEOUT_VALUE);
 
-    // if a delay between executions is set, no consecutive executions can occur
-    if (allowConcurrentExecutions && applyDelayBetweenExecutions) {
-        allowConcurrentExecutions = false;
-    }
+    let executions = [];
 
-    let currentlyExecuting = false;
+    let waitTimer = null;
+    let waitTimerIsImmediate = false;
 
-    let callsWaiting = false;
-    let firstWaitingCall = null;
-    let lastProcessedCall = null;
-    let lastCall = null;
-    let lastCallArgs = null;
-    let lastCallThis = null;
-    let lastExecution = null;
-
-    let nextRunTimer = null;
-    let nextRunIsImmediate = false;
-
-    let currentPromise = null;
-
-    let nextPromise = null;
-    let nextResolver = null;
-    let nextRejecter = null;
-
-    function cancelWaitingRun() {
+    function cancelWait() {
         // properly cancel either immediate or timeout
-        if (nextRunTimer) {
-            if (nextRunIsImmediate) {
-                clearImmediate(nextRunTimer);
+        if (waitTimer) {
+            if (waitTimerIsImmediate) {
+                clearImmediate(waitTimer);
             }
             else {
-                clearTimeout(nextRunTimer);
+                clearTimeout(waitTimer);
             }
         }
 
-        nextRunTimer = null;
+        waitTimer = null;
     }
 
-    function scheduleRun(func, time) {
-        cancelWaitingRun();
+    function scheduleWait(func, time) {
+        cancelWait();
 
         // clamp to acceptable timeout values
         time = _.clamp(time, 0, MAX_TIMEOUT_VALUE);
 
         // use either immediates or timeouts
         if (time === 0) {
-            nextRunTimer = setImmediate(func);
-            nextRunIsImmediate = true;
+            waitTimer = setImmediate(func);
+            waitTimerIsImmediate = true;
         }
         else {
-            nextRunTimer = setTimeout(func, time);
-            nextRunIsImmediate = false;
+            waitTimer = setTimeout(func, time);
+            waitTimerIsImmediate = false;
         }
     }
 
-    function setNextPromise() {
-        nextPromise = new Promise(function(resolve, reject) {
-            // make sure to keep the resolver and rejecter
-            nextResolver = resolve;
-            nextRejecter = reject;
-        });
-    }
-
-    function scheduleNextRun() {
-        let currentTime = Date.now();
-
-        if (callsWaiting) {
-            // calls are waiting, schedule a run
-
-            let times = [lastCall + interval];
-
-            // apply max wait(s)
-            if (applyMaxWait) {
-                if (leading && lastProcessedCall) {
-                    times.push(lastProcessedCall + maxWait);
-                }
-
-                if (trailing && firstWaitingCall) {
-                    times.push(firstWaitingCall + maxWait);
-                }
-            }
-
-            let nextTime = _.min(times);
-
-            // apply delay between executions
-            if (applyDelayBetweenExecutions && lastExecution) {
-                let nextAllowedTime = lastExecution + delayBetweenExecutions;
-
-                if (nextAllowedTime > nextTime) {
-                    nextTime = nextAllowedTime;
-                }
-            }
-
-            // schedule actual run
-            let wait = nextTime - currentTime;
-            scheduleRun(executeUnderlying, wait);
-        }
-    }
-
-    function executeUnderlying() {
-        let promise = nextPromise;
-        let resolve = nextResolver;
-        let reject = nextRejecter;
-
-        let funcArgs = lastCallArgs;
-        let funcThis = lastCallThis;
-
+    function dispatchExecution(execution) {
         return co(function*() {
-            currentlyExecuting = true;
-            callsWaiting = false;
-            firstWaitingCall = null;
-            lastProcessedCall = lastCall;
-            currentPromise = promise;
-            cancelWaitingRun();
-            setNextPromise();
+            execution.startTime = Date.now();
 
             try {
-                let result = yield underlying.apply(funcThis, funcArgs);
+                let result = yield underlying.apply(execution.this, execution.arguments);
 
-                resolve(result);
+                execution.resolve(result);
             }
             catch (err) {
-                reject(err);
+                execution.reject(err);
             }
 
-            let finishTime = Date.now();
+            execution.finishTime = Date.now();
 
-            // clean up if appropriate
-            if (currentPromise === promise) {
-                currentlyExecuting = false;
-                lastExecution = finishTime;
+            maintainExecutions(); // eslint-disable-line no-use-before-define
+        })
+    }
 
-                // schedule any delayed calls
-                if (callsWaiting) {
-                    scheduleNextRun();
+    function maintainExecutions() {
+        let currentTime = Date.now();
+
+        cancelWait();
+
+        let nextCheckWait;
+
+        for (let i = 0; i < executions.length; i++) {
+            let execution = executions[i];
+
+            if (execution.startTime) {
+                // execution started
+
+                if (execution.finishTime) {
+                    // execution finished
+
+                    if (applyDelayBetweenExecutions && execution.finishTime + delayBetweenExecutions > currentTime) {
+                        // keep execution in array to constrain next execution
+                        continue;
+                    }
+                    else if (execution.lastCallTime + interval > currentTime) {
+                        // still within debounce interval, allow calls to continue being attached
+                        continue;
+                    }
+                    else {
+                        // remove execution from array and move on
+                        executions.splice(i, 1);
+                        i--;
+                        continue;
+                    }
+                }
+                else {
+                    // no need to operate on an unfinished execution
+                    continue;
                 }
             }
+
+            let expectedExecutionTime = execution.isLeading ? execution.firstCallTime : execution.lastCallTime + interval;
+
+            if (i > 0) {
+                // execution before this, check if wait required
+
+                let lastExecution = executions[i - 1];
+
+                if (!allowConcurrentExecutions) {
+                    // no concurrent executions allowed
+
+                    if (!lastExecution.startTime || !lastExecution.finishTime) {
+                        // last execution is running or hasn't even started, so can't start this one
+                        expectedExecutionTime = null;
+                    }
+                    else {
+                        if (applyDelayBetweenExecutions) {
+                            // need to make sure execution is sufficiently delayed
+                            expectedExecutionTime = Math.max(lastExecution.finishTime + delayBetweenExecutions, expectedExecutionTime);
+                        }
+                    }
+                }
+                else {
+                    if (applyDelayBetweenExecutions) {
+                        // need to make sure execution is sufficiently delayed
+
+                        if (!lastExecution.startTime) {
+                            // last execution hasn't even started, so can't start this one
+                            expectedExecutionTime = null;
+                        }
+                        else {
+                            // need to make sure execution is sufficiently delayed
+                            expectedExecutionTime = Math.max(lastExecution.startTime + delayBetweenExecutions, expectedExecutionTime);
+                        }
+                    }
+                }
+            }
+
+            if (expectedExecutionTime) {
+                if (expectedExecutionTime <= currentTime) {
+                    // need to run the execution now, dispatch and continue operating on executions
+                    dispatchExecution(execution);
+                    continue;
+                }
+                else {
+                    // defined amount of time before execution can begin
+                    nextCheckWait = expectedExecutionTime - currentTime;
+                }
+            }
+
+            break;
+        }
+
+        if (nextCheckWait) {
+            scheduleWait(maintainExecutions, nextCheckWait);
+        }
+    }
+
+    function createNewExecution({
+        firstCallTime,
+        isLeading,
+        executionArguments,
+        executionThis
+    }) {
+        let execution = {
+            firstCallTime,
+            lastCallTime: firstCallTime,
+            isLeading,
+            arguments: executionArguments,
+            this: executionThis,
+            startTime: null,
+            finishTime: null
+        };
+        execution.promise = new Promise(function(resolve, reject) {
+            execution.resolve = resolve;
+            execution.reject = reject;
+        });
+
+        executions.push(execution);
+
+        return execution;
+    }
+
+    function getApplicableExecution(currentTime, callArguments, callThis) {
+        let lastExecution = _.last(executions);
+
+        if (!lastExecution) {
+            // there are no active executions, create a new one
+            return createNewExecution({
+                firstCallTime: currentTime,
+                isLeading: leading,
+                executionArguments: callArguments,
+                executionThis: callThis
+            });
+        }
+
+        if (condenseExecutions && !lastExecution.startTime) {
+            // condense into non-executed execution
+            return lastExecution;
+        }
+
+        if (lastExecution.lastCallTime + interval > currentTime) {
+            // call falls within debounce interval of last execution
+
+            if (lastExecution.isLeading && trailing) {
+                // need to create a trailing execution
+                return createNewExecution({
+                    firstCallTime: lastExecution.firstCallTime,
+                    isLeading: false,
+                    executionArguments: callArguments,
+                    executionThis: callThis
+                });
+            }
+
+            if (applyMaxWait && lastExecution.firstCallTime + maxWait <= currentTime) {
+                // max wait has been exceeded, create new execution
+                return createNewExecution({
+                    firstCallTime: currentTime,
+                    isLeading: leading,
+                    executionArguments: callArguments,
+                    executionThis: callThis
+                });
+            }
+
+            // attach to last execution
+            return lastExecution;
+        }
+
+        // need to create a new execution
+        return createNewExecution({
+            firstCallTime: currentTime,
+            isLeading: leading,
+            executionArguments: callArguments,
+            executionThis: callThis
         });
     }
 
     let debounced = function debouncer() {
         let currentTime = Date.now();
-        let withinDebounceInterval = lastCall && lastCall + interval > currentTime;
-        lastCall = currentTime;
-        lastCallArgs = arguments;
-        lastCallThis = this;
+        let execution = getApplicableExecution(currentTime, arguments, this);
 
-        if (leading) {
-            if (!withinDebounceInterval) {
-                // just run now
-                executeUnderlying();
-                return currentPromise;
-            }
-            else {
-                // even if not the leading call, max wait may apply forcing a run
-                if (applyMaxWait) {
-                    let waitTime = currentTime - lastProcessedCall;
+        // update last call time
+        execution.lastCallTime = currentTime;
 
-                    if (waitTime >= maxWait) {
-                        callsWaiting = true;
-                    }
-                }
-            }
+        if (!execution.isLeading) {
+            // update arguments and this for trailing execution
+            execution.arguments = arguments;
+            execution.this = this;
         }
 
-        if (trailing) {
-            // calls are always waiting on the trailing edge
-            callsWaiting = true;
+        maintainExecutions();
 
-            if (!firstWaitingCall) {
-                firstWaitingCall = currentTime;
-            }
-        }
-
-        if (callsWaiting) {
-            // don't schedule runs during an execution unless allowed to
-            if (!currentlyExecuting || allowConcurrentExecutions) {
-                scheduleNextRun();
-            }
-        }
-
-        // provide proper promise
-        return waitForNextExecution ? nextPromise : currentPromise;
+        return execution.promise;
     }
 
     debounced.flush = function flush() {
-        executeUnderlying();
+        _.forEach(executions, function(execution) { // eslint-disable-line lodash/prefer-filter
+            if (!execution.startTime) {
+                // execution hasn't started, dispatch
+                dispatchExecution(execution);
+            }
+        });
+
+        maintainExecutions();
     }
 
     debounced.cancel = function cancel() {
-        nextRejecter(new Error('call canceled'));
-        callsWaiting = false;
-        firstWaitingCall = null;
-        lastCall = null;
-        cancelWaitingRun();
-        setNextPromise();
-    }
+        executions = _.reject(executions, function(execution) {
+            if (execution.startTime) {
+                // execution has started, leave alone
+                return false;
+            }
+            else {
+                // execution hasn't started, cancel
+                execution.reject(new Error('canceled'));
+                return true;
+            }
+        });
 
-    setNextPromise();
+        maintainExecutions();
+    }
 
     return debounced;
 }
