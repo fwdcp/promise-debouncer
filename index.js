@@ -22,12 +22,12 @@ module.exports = function(underlying, interval = 0, {
     condenseExecutions = !!condenseExecutions;
     allowConcurrentExecutions = !!allowConcurrentExecutions;
 
-    interval = _.clamp(interval, 0, MAX_TIMEOUT_VALUE);
+    interval = _.clamp(_.toFinite(interval), 0, MAX_TIMEOUT_VALUE);
 
-    let applyMaxWait = !_.isNil(maxWait);
+    let applyMaxWait = _.isFinite(_.toNumber(maxWait));
     maxWait = _.clamp(maxWait, interval, MAX_TIMEOUT_VALUE);
 
-    let applyDelayBetweenExecutions = !_.isNil(delayBetweenExecutions);
+    let applyDelayBetweenExecutions = _.isFinite(_.toNumber(delayBetweenExecutions));
     delayBetweenExecutions = _.clamp(delayBetweenExecutions, 0, MAX_TIMEOUT_VALUE);
 
     let executions = [];
